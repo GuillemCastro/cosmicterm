@@ -81,7 +81,7 @@ impl WindowState {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, swapchain_format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
-        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(16.0, 21.0));
+        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(16.0, 16.0));
 
         let physical_width = (physical_size.width as f64 * scale_factor) as f32;
         let physical_height = (physical_size.height as f64 * scale_factor) as f32;

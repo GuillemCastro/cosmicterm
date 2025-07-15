@@ -1,4 +1,6 @@
 use crate::pty::PtySession;
+use anyhow::Result;
+use crossbeam_channel::Receiver;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -13,26 +15,41 @@ pub struct Terminal {
 
 impl Terminal {
     pub fn new(pty: PtySession) -> Self {
+        let reader = pty.get_reader();
         let inner = Arc::new(Mutex::new(TerminalInner::new(pty)));
         let terminal = Terminal { terminal: inner };
-        terminal.start_feeding();
+        terminal.start_feeding(reader);
         terminal
     }
 
     pub fn as_text(&self) -> String {
-        self.terminal.lock().expect("Failed to lock terminal").as_text()
+        self.terminal
+            .lock()
+            .expect("Failed to lock terminal")
+            .as_text()
     }
 
     pub fn write(&self, data: &[u8]) {
-        self.terminal.lock().expect("Failed to lock terminal").write(data);
+        self.terminal
+            .lock()
+            .expect("Failed to lock terminal")
+            .write(data);
     }
 
-    fn start_feeding(&self) {
-        let terminal = Arc::clone(&self.terminal);
-        let reader = terminal.lock().expect("Failed to lock terminal").pty.get_reader();
+    pub fn resize(&self, width: u32, height: u32) -> Result<()> {
+        let terminal = self.terminal.lock().expect("Failed to lock terminal");
+
+        let cols: u16 = (width / 8) as u16; // Assuming 8 pixels per character
+        let rows = (height / 16) as u16; // Assuming 16 pixels per character
+        tracing::info!("Resizing terminal to {} cols and {} rows", cols, rows);
+        terminal.pty.resize(cols, rows)
+    }
+
+    fn start_feeding(&self, reader: Receiver<String>) {
+        let terminal = self.terminal.clone();
         std::thread::spawn(move || {
             for output in reader.iter() {
-                println!("PTY RAW: {:?}", output);
+                tracing::info!("PTY RAW: {:?}", output);
                 if output.is_empty() {
                     continue; // Skip empty outputs
                 }
@@ -40,10 +57,6 @@ impl Terminal {
                     .lock()
                     .expect("Failed to lock terminal")
                     .feed_bytes(output.as_bytes());
-                println!(
-                    "TERMINAL TEXT (from receiver): {:?}",
-                    terminal.lock().expect("failed to lock").as_text()
-                );
             }
         });
     }
@@ -54,6 +67,7 @@ struct TerminalInner {
     pub cursor_x: usize,
     pub cursor_y: usize,
     pty: PtySession,
+    parser: Parser,
 }
 
 impl TerminalInner {
@@ -65,12 +79,14 @@ impl TerminalInner {
             cursor_x: 0,
             cursor_y: 0,
             pty,
+            parser: Parser::new(),
         }
     }
 
     pub fn feed_bytes(&mut self, bytes: &[u8]) {
-        let mut parser = Parser::new();
+        let mut parser = std::mem::take(&mut self.parser);
         parser.advance(self, bytes);
+        self.parser = parser;
     }
 
     pub fn as_text(&self) -> String {
@@ -86,44 +102,51 @@ impl TerminalInner {
              => b"\x7f", // DEL
             _ => data
         };
-        self.pty.get_writer().send(command.to_vec()).expect("Failed to write to PTY");
+        self.pty
+            .get_writer()
+            .send(command.to_vec())
+            .expect("Failed to write to PTY");
     }
-
 }
 
 impl Perform for TerminalInner {
     fn print(&mut self, c: char) {
-        while self.lines.len() <= self.cursor_y {
-            self.lines.push_back(String::new());
+        // If the cursor position exceeds the current line, extend the lines vector
+        if self.cursor_y >= self.lines.len() {
+            self.lines.resize(self.cursor_y + 1, String::new());
         }
 
-        let line = self.lines.get_mut(self.cursor_y).unwrap();
+        let line = &mut self.lines[self.cursor_y];
 
-        if self.cursor_x > line.chars().count() {
-            line.extend(std::iter::repeat(' ').take(self.cursor_x - line.chars().count()));
+        // Ensure the line is long enough to accommodate the cursor position
+        let char_count = line.chars().count();
+        if self.cursor_x > char_count {
+            line.extend(std::iter::repeat(' ').take(self.cursor_x - char_count));
         }
 
-        if self.cursor_x == line.chars().count() {
+        let updated_char_count = line.chars().count();
+        if self.cursor_x == updated_char_count {
             line.push(c);
         } else {
-            let start = line
-                .char_indices()
-                .nth(self.cursor_x)
-                .map(|(i, _)| i)
-                .unwrap();
-            let end = line
-                .char_indices()
-                .nth(self.cursor_x + 1)
-                .map(|(i, _)| i)
-                .unwrap_or(line.len());
-            line.replace_range(start..end, &c.to_string());
+            if let Some((start, _)) = line.char_indices().nth(self.cursor_x) {
+                let end = line
+                    .char_indices()
+                    .nth(self.cursor_x + 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(line.len());
+
+                line.replace_range(start..end, &c.to_string());
+            } else {
+                // if cursor_x is out of bounds, just append
+                line.push(c);
+            }
         }
 
         self.cursor_x += 1;
     }
 
     fn execute(&mut self, byte: u8) {
-        eprintln!("Execute byte: {:?}", byte);
+        // eprintln!("Execute byte: {:?}", byte);
         match byte {
             b'\n' => {
                 self.cursor_x = 0;
@@ -131,9 +154,6 @@ impl Perform for TerminalInner {
                 if self.cursor_y >= Self::MAX_LINES {
                     self.lines.pop_front();
                     self.cursor_y = Self::MAX_LINES - 1;
-                }
-                if self.cursor_y >= self.lines.len() {
-                    self.lines.push_back(String::new());
                 }
             }
             b'\r' => {
@@ -150,10 +170,10 @@ impl Perform for TerminalInner {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, c: char) {
-        eprintln!(
-            "CSI Dispatch: params={:?}, intermediates={:?}, ignore={}, c='{}'",
-            params, intermediates, ignore, c
-        );
+        // eprintln!(
+        //     "CSI Dispatch: params={:?}, intermediates={:?}, ignore={}, c='{}'",
+        //     params, intermediates, ignore, c
+        // );
         let params: Vec<&[u16]> = params.iter().collect();
         // Handle some common CSI sequences
         match c {
@@ -164,11 +184,6 @@ impl Perform for TerminalInner {
 
                 self.cursor_y = row.saturating_sub(1);
                 self.cursor_x = col.saturating_sub(1);
-
-                // Ensure lines vec is long enough
-                while self.lines.len() <= self.cursor_y {
-                    self.lines.push_back(String::new());
-                }
             }
             'J' => {
                 // Erase in Display
@@ -182,7 +197,7 @@ impl Perform for TerminalInner {
             }
             // Cursor request
             'n' => {
-                println!("Cursor position request received");
+                tracing::info!("Cursor position request received");
                 // Respond with cursor position
                 if params.is_empty() || params[0].is_empty() {
                     // Respond with current cursor position

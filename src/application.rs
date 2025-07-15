@@ -7,12 +7,11 @@ use glyphon::Resolution;
 use glyphon::Shaping;
 use glyphon::TextArea;
 use glyphon::TextBounds;
+use winit::event::ElementState;
 use winit::keyboard::Key;
 use winit::keyboard::NamedKey;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::thread;
-use std::time::Duration;
 use wgpu::CommandEncoderDescriptor;
 use wgpu::LoadOp;
 use wgpu::Operations;
@@ -108,6 +107,12 @@ impl ApplicationHandler for Application {
                 surface_config.width = size.width;
                 surface_config.height = size.height;
                 surface.configure(&device, &surface_config);
+                text_buffer.set_size(
+                    font_system,
+                    Some(surface_config.width as f32),
+                    Some(surface_config.height as f32),
+                );
+                self.terminal.resize(size.width, size.height).unwrap();
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -118,7 +123,6 @@ impl ApplicationHandler for Application {
                         height: surface_config.height,
                     },
                 );
-
                 text_buffer.set_text(
                     font_system,
                     &self.terminal.as_text(),
@@ -180,13 +184,18 @@ impl ApplicationHandler for Application {
                 event,
                 is_synthetic,
             } => {
-                if is_synthetic {
+                if is_synthetic || event.state == ElementState::Released {
                     return;
                 }
-                println!("Keyboard input: {:?}", event);
+                tracing::info!("Keyboard input: {:?}", event);
+
+                if let Key::Named(NamedKey::Escape) = event.key_without_modifiers() {
+                    tracing::info!("Terminal text: {}", self.terminal.as_text());
+                    return;
+                }
 
                 if let Some(text) = event.text_with_all_modifiers() {
-                    println!("Text input: {:?}", text);
+                    tracing::info!("Text input: {:?}", text);
                     self.terminal.write(text.as_bytes());
                 } else {
                     let key = event.key_without_modifiers();
@@ -199,7 +208,6 @@ impl ApplicationHandler for Application {
                     };
                     self.terminal.write(data);
                 }
-                thread::sleep(Duration::from_millis(100));
             }
             _ => {}
         }

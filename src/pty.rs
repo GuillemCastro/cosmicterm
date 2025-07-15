@@ -25,7 +25,7 @@ impl PtySession {
         let inner = Session::spawn()?;
         let reader = inner.receiver.clone();
         let writer = inner.sender.clone();
-        Ok(Self { 
+        Ok(Self {
             _session: Arc::new(Mutex::new(inner)),
             reader,
             writer,
@@ -38,6 +38,18 @@ impl PtySession {
 
     pub fn get_writer(&self) -> Sender<Vec<u8>> {
         self.writer.clone()
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self._session
+            .lock()
+            .expect("Failed to lock PTY session")
+            .master
+            .resize(PtySize {
+                rows,
+                cols,
+                ..Default::default()
+            })
     }
 }
 
@@ -67,10 +79,15 @@ impl Session {
     /// Spawns the shell inside a PTY and returns a receiver for its output
     fn spawn() -> Result<Self> {
         let shell = get_shell();
-        eprintln!("Spawning shell: {}", shell);
+        tracing::info!("Spawning shell: {}", shell);
 
         let pty_system = NativePtySystem::default();
-        let pair = pty_system.openpty(PtySize::default())?;
+        let pair = pty_system.openpty(PtySize {
+            rows: 600,
+            cols: 800,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
 
         let mut command = CommandBuilder::new(shell);
         for (key, value) in Self::DEFAULT_ENV {
@@ -113,7 +130,7 @@ impl Session {
                         match std::str::from_utf8(&leftover) {
                             Ok(valid_str) => {
                                 // whole buffer is valid UTF-8
-                                eprintln!("PTY TEXT: {:?}", valid_str);
+                                tracing::info!("PTY TEXT: {:?}", valid_str);
                                 if sender.send(valid_str.to_string()).is_err() {
                                     break;
                                 }
@@ -126,7 +143,7 @@ impl Session {
                                     let valid_str =
                                         String::from_utf8_lossy(&leftover[..valid_up_to])
                                             .to_string();
-                                    eprintln!("PTY TEXT: {:?}", valid_str);
+                                    tracing::info!("PTY TEXT: {:?}", valid_str);
                                     if sender.send(valid_str).is_err() {
                                         break;
                                     }
@@ -139,7 +156,7 @@ impl Session {
                         }
                     }
                     Err(e) => {
-                        eprintln!("PTY read error: {e}");
+                        tracing::info!("PTY read error: {e}");
                         break;
                     }
                 }
@@ -150,13 +167,13 @@ impl Session {
     fn start_writer(mut writer: Box<dyn std::io::Write + Send>, receiver: Receiver<Vec<u8>>) {
         thread::spawn(move || {
             while let Ok(command) = receiver.recv() {
-                eprintln!("PTY WRITE: {:?}", command);
+                tracing::info!("PTY WRITE: {:?}", command);
                 if writer.write_all(&command).is_err() {
-                    eprintln!("Failed to write to PTY");
+                    tracing::info!("Failed to write to PTY");
                     break;
                 }
                 if writer.flush().is_err() {
-                    eprintln!("Failed to flush PTY writer");
+                   tracing::info!("Failed to flush PTY writer");
                     break;
                 }
             }
