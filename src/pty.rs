@@ -74,6 +74,8 @@ impl Session {
         ("TERM", "xterm-256color"),
         ("COLORTERM", "truecolor"),
         ("LANG", "en_US.UTF-8"),
+        ("TERM_PROGRAM", "cosmicterm"),
+        ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION")),
     ];
 
     /// Spawns the shell inside a PTY and returns a receiver for its output
@@ -173,7 +175,7 @@ impl Session {
                     break;
                 }
                 if writer.flush().is_err() {
-                   tracing::info!("Failed to flush PTY writer");
+                    tracing::info!("Failed to flush PTY writer");
                     break;
                 }
             }
