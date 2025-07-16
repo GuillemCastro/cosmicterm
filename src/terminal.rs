@@ -1,6 +1,7 @@
 use crate::pty::PtySession;
 use anyhow::Result;
 use crossbeam_channel::Receiver;
+use std::cmp::max;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -107,6 +108,27 @@ impl TerminalInner {
             .send(command.to_vec())
             .expect("Failed to write to PTY");
     }
+
+    fn move_cursor(&mut self, x: usize, y: usize) {
+        tracing::debug!(
+            "Moving cursor from ({}, {}) to ({}, {})",
+            self.cursor_x,
+            self.cursor_y,
+            x,
+            y
+        );
+        self.cursor_x = x;
+        self.cursor_y = y;
+
+        // Ensure cursor position is within bounds
+        if self.cursor_y >= self.lines.len() {
+            self.cursor_y = self.lines.len().saturating_sub(1);
+        }
+        if self.cursor_x > self.lines[self.cursor_y].chars().count() {
+            self.cursor_x = self.lines[self.cursor_y].chars().count();
+        }
+        tracing::debug!("Cursor moved to ({}, {})", self.cursor_x, self.cursor_y);
+    }
 }
 
 impl Perform for TerminalInner {
@@ -187,17 +209,75 @@ impl Perform for TerminalInner {
             }
             'J' => {
                 // Erase in Display
-                // For simplicity: clear all screen if param 2 or 3, else do nothing
                 let param = params.get(0).and_then(|p| p.first()).copied().unwrap_or(0);
-                if param == 2 || param == 3 {
+                // Erase from cursor to end of screen
+                if param == 0 {
+                    tracing::debug!("Erasing from cursor to end of screen");
+                    for line in self.lines.iter_mut().skip(self.cursor_y) {
+                        line.clear();
+                    }
+                    self.lines.truncate(self.cursor_y + 1);
+                    if let Some(line) = self.lines.get_mut(self.cursor_y) {
+                        *line = line.chars().take(self.cursor_x).collect();
+                    }
+                }
+                // Erase from start of screen to cursor
+                else if param == 1 {
+                    tracing::debug!("Erasing from start of screen to cursor");
+                    for line in self.lines.iter_mut().take(self.cursor_y) {
+                        line.clear();
+                    }
+                    if let Some(line) = self.lines.get_mut(self.cursor_y) {
+                        *line = line.chars().skip(self.cursor_x).collect();
+                    }
+                }
+                // Erase entire screen
+                else if param == 2 || param == 3 {
+                    tracing::debug!("Erasing entire screen");
                     self.lines.clear();
                     self.cursor_x = 0;
                     self.cursor_y = 0;
                 }
             }
+            // Erase in Line
+            'K' => {
+                let param = params.get(0).and_then(|p| p.first()).copied().unwrap_or(0);
+                if param == 0 {
+                    // Erase from cursor to end of line
+                    tracing::debug!(
+                        "Erasing from cursor to end of line. Cursor at ({}, {})",
+                        self.cursor_x,
+                        self.cursor_y
+                    );
+                    tracing::debug!(
+                        "Current line before erase: {:?}",
+                        self.lines.get(self.cursor_y)
+                    );
+                    tracing::debug!(
+                        "Current line length: {}",
+                        self.lines.get(self.cursor_y).map_or(0, |l| l.len())
+                    );
+                    if let Some(line) = self.lines.get_mut(self.cursor_y) {
+                        // take only the first self.cursor_x characters
+                        *line = line.chars().take(self.cursor_x).collect();
+                    }
+                } else if param == 1 {
+                    // Erase from start of line to cursor
+                    tracing::debug!("Erasing from start of line to cursor");
+                    if let Some(line) = self.lines.get_mut(self.cursor_y) {
+                        *line = line.chars().skip(self.cursor_x).collect();
+                    }
+                } else if param == 2 {
+                    // Erase entire line
+                    tracing::debug!("Erasing entire line");
+                    if let Some(line) = self.lines.get_mut(self.cursor_y) {
+                        line.clear();
+                    }
+                }
+            }
             // Cursor request
             'n' => {
-                tracing::info!("Cursor position request received");
+                tracing::debug!("Cursor position request received");
                 // Respond with cursor position
                 if params.is_empty() || params[0].is_empty() {
                     // Respond with current cursor position
@@ -211,7 +291,44 @@ impl Perform for TerminalInner {
                     self.write(response.as_bytes());
                 }
             }
+            // Cursor Up
+            'A' => {
+                let count = max(
+                    1,
+                    params.get(0).and_then(|p| p.first()).copied().unwrap_or(1) as usize,
+                );
+                tracing::debug!("Cursor Up by {}, other params: {:?}", count, params);
+                self.move_cursor(self.cursor_x, self.cursor_y.saturating_sub(count));
+            }
+            // Cursor Down
+            'B' => {
+                let count = max(
+                    1,
+                    params.get(0).and_then(|p| p.first()).copied().unwrap_or(1) as usize,
+                );
+                tracing::debug!("Cursor Down by {}, other params: {:?}", count, params);
+                self.move_cursor(self.cursor_x, self.cursor_y.saturating_add(count));
+            }
+            // Cursor Right
+            'C' => {
+                let count = max(
+                    1,
+                    params.get(0).and_then(|p| p.first()).copied().unwrap_or(1) as usize,
+                );
+                tracing::debug!("Cursor Right by {}, other params: {:?}", count, params);
+                self.move_cursor(self.cursor_x.saturating_add(count), self.cursor_y);
+            }
+            // Cursor Left
+            'D' => {
+                let count = max(
+                    1,
+                    params.get(0).and_then(|p| p.first()).copied().unwrap_or(1) as usize,
+                );
+                tracing::debug!("Cursor Left by {}, other params: {:?}", count, params);
+                self.move_cursor(self.cursor_x.saturating_sub(count), self.cursor_y);
+            }
             _ => {
+                tracing::debug!("Unhandled CSI sequence: {} with params: {:?}", c, params);
                 // Ignore other CSI sequences for now
             }
         }
