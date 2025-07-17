@@ -37,11 +37,8 @@ impl Terminal {
             .write(data);
     }
 
-    pub fn resize(&self, width: u32, height: u32) -> Result<()> {
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let terminal = self.terminal.lock().expect("Failed to lock terminal");
-
-        let cols: u16 = (width / 8) as u16; // Assuming 8 pixels per character
-        let rows = (height / 16) as u16; // Assuming 16 pixels per character
         tracing::info!("Resizing terminal to {} cols and {} rows", cols, rows);
         terminal.pty.resize(cols, rows)
     }
@@ -189,6 +186,14 @@ impl Perform for TerminalInner {
             }
             _ => {}
         }
+    }
+
+    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
+        tracing::debug!(
+            "OSC Dispatch: params={:?}, bell_terminated={}",
+            _params,
+            _bell_terminated
+        );
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, c: char) {

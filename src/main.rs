@@ -2,9 +2,11 @@ use crate::application::Application;
 use crate::pty::PtySession;
 use crate::terminal::Terminal;
 use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::fmt;
+use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, layer::SubscriberExt};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::ControlFlow;
+use winit::event_loop::EventLoop;
 
 mod application;
 mod pty;

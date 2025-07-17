@@ -7,9 +7,6 @@ use glyphon::Resolution;
 use glyphon::Shaping;
 use glyphon::TextArea;
 use glyphon::TextBounds;
-use winit::event::ElementState;
-use winit::keyboard::Key;
-use winit::keyboard::NamedKey;
 use std::sync::Arc;
 use std::sync::Mutex;
 use wgpu::CommandEncoderDescriptor;
@@ -20,9 +17,13 @@ use wgpu::RenderPassDescriptor;
 use wgpu::TextureViewDescriptor;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
+use winit::dpi::PhysicalSize;
+use winit::event::ElementState;
 use winit::event::StartCause;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::Key;
+use winit::keyboard::NamedKey;
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::Window;
 use winit::window::WindowId;
@@ -104,15 +105,41 @@ impl ApplicationHandler for Application {
 
         match event {
             WindowEvent::Resized(size) => {
-                surface_config.width = size.width;
-                surface_config.height = size.height;
+                // size is physical pixels already
+                let phys_w = size.width;
+                let phys_h = size.height;
+
+                // reconfigure your surface
+                surface_config.width = phys_w;
+                surface_config.height = phys_h;
                 surface.configure(&device, &surface_config);
-                text_buffer.set_size(
-                    font_system,
-                    Some(surface_config.width as f32),
-                    Some(surface_config.height as f32),
+
+                // 1) compute cols/rows in logical space
+                let scale = window.scale_factor() as f32;
+                let log_w = phys_w as f32 / scale;
+                let log_h = phys_h as f32 / scale;
+
+                let font_px = 16.0;
+                let cols = (log_w / font_px).floor() as u16;
+                let rows = (log_h / font_px).floor() as u16;
+                tracing::info!("Resizing terminal to {} cols and {} rows", cols, rows);
+
+                tracing::info!(
+                    "phys = {}×{}px, logical = {}×{}px, cols×rows = {}×{}",
+                    phys_w,
+                    phys_h,
+                    log_w,
+                    log_h,
+                    cols,
+                    rows,
                 );
-                self.terminal.resize(size.width, size.height).unwrap();
+
+                // 2) tell Glyphon the *physical* viewport size
+                text_buffer.set_size(font_system, Some(phys_w as f32), Some(phys_h as f32));
+
+                // 3) resize your TTY
+                self.terminal.resize(211, 58).unwrap();
+
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -140,7 +167,7 @@ impl ApplicationHandler for Application {
                             buffer: text_buffer,
                             left: 10.0,
                             top: 10.0,
-                            scale: 1.0,
+                            scale: window.scale_factor() as f32,
                             bounds: TextBounds::default(),
                             default_color: Color::rgb(255, 255, 255),
                             custom_glyphs: &[],
@@ -169,6 +196,13 @@ impl ApplicationHandler for Application {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
+
+                    // Stretch the render‐pass to cover the whole surface!
+                    let w = surface_config.width as f32;
+                    let h = surface_config.height as f32;
+                    pass.set_viewport(0.0, 0.0, w, h, 0.0, 1.0);
+                    // (optional) also ensure the scissor covers the full buffer:
+                    pass.set_scissor_rect(0, 0, w as u32, h as u32);
 
                     text_renderer.render(&atlas, &viewport, &mut pass).unwrap();
                 }
