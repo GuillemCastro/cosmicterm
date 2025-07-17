@@ -17,7 +17,6 @@ use wgpu::RenderPassDescriptor;
 use wgpu::TextureViewDescriptor;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::dpi::PhysicalSize;
 use winit::event::ElementState;
 use winit::event::StartCause;
 use winit::event::WindowEvent;
@@ -138,7 +137,7 @@ impl ApplicationHandler for Application {
                 text_buffer.set_size(font_system, Some(phys_w as f32), Some(phys_h as f32));
 
                 // 3) resize your TTY
-                self.terminal.resize(211, 58).unwrap();
+                self.terminal.resize(cols, rows).unwrap();
 
                 window.request_redraw();
             }
