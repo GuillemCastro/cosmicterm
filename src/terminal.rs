@@ -38,9 +38,23 @@ impl Terminal {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let terminal = self.terminal.lock().expect("Failed to lock terminal");
+        let mut terminal = self.terminal.lock().expect("Failed to lock terminal");
         tracing::info!("Resizing terminal to {} cols and {} rows", cols, rows);
+        terminal.size = Some(Size { cols, rows });
         terminal.pty.resize(cols, rows)
+    }
+
+    pub fn cursor(&self) -> (usize, usize) {
+        let terminal = self.terminal.lock().expect("Failed to lock terminal");
+        (terminal.cursor_x, terminal.cursor_y)
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.terminal.lock().expect("Failed to lock terminal").is_dirty()
+    }
+
+    pub fn clear_dirty(&self) {
+        self.terminal.lock().expect("Failed to lock terminal").clear_dirty();
     }
 
     fn start_feeding(&self, reader: Receiver<String>) {
@@ -60,12 +74,19 @@ impl Terminal {
     }
 }
 
+pub struct Size {
+    pub cols: u16,
+    pub rows: u16,
+}
+
 struct TerminalInner {
     pub lines: VecDeque<String>,
     pub cursor_x: usize,
     pub cursor_y: usize,
     pty: PtySession,
     parser: Parser,
+    size: Option<Size>,
+    dirty: bool,
 }
 
 impl TerminalInner {
@@ -78,6 +99,8 @@ impl TerminalInner {
             cursor_y: 0,
             pty,
             parser: Parser::new(),
+            size: None,
+            dirty: false,
         }
     }
 
@@ -88,7 +111,25 @@ impl TerminalInner {
     }
 
     pub fn as_text(&self) -> String {
-        self.lines.iter().cloned().collect::<Vec<_>>().join("\n")
+        return self
+            .lines
+            .iter()
+            .skip(
+                self.lines
+                    .len()
+                    .saturating_sub(self.size.as_ref().map_or(0, |s| s.rows as usize)),
+            )
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub fn clear_dirty(&mut self) {
+        self.dirty = false;
     }
 
     fn write(&mut self, data: &[u8]) {
@@ -162,6 +203,7 @@ impl Perform for TerminalInner {
         }
 
         self.cursor_x += 1;
+        self.dirty = true;
     }
 
     fn execute(&mut self, byte: u8) {
@@ -186,6 +228,7 @@ impl Perform for TerminalInner {
             }
             _ => {}
         }
+        self.dirty = true;
     }
 
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
@@ -337,5 +380,6 @@ impl Perform for TerminalInner {
                 // Ignore other CSI sequences for now
             }
         }
+        self.dirty = true;
     }
 }

@@ -1,14 +1,21 @@
+use crate::terminal;
 use crate::terminal::Terminal;
 use crate::window::WindowState;
 use glyphon::Attrs;
+use glyphon::Buffer;
 use glyphon::Color;
 use glyphon::Family;
+use glyphon::Metrics;
 use glyphon::Resolution;
 use glyphon::Shaping;
 use glyphon::TextArea;
 use glyphon::TextBounds;
+use glyphon::Wrap;
+use winit::event_loop::ControlFlow;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 use wgpu::CommandEncoderDescriptor;
 use wgpu::LoadOp;
 use wgpu::Operations;
@@ -43,20 +50,20 @@ impl Application {
 }
 
 impl ApplicationHandler for Application {
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        let state = match self.window_state.as_mut() {
-            Some(state) => state,
-            None => return,
-        };
-        let state = state.lock().unwrap();
-        let window = &state.window;
-
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         match cause {
-            StartCause::Poll => {
-                window.request_redraw();
+            StartCause::Init { .. }
+            | StartCause::ResumeTimeReached { .. } => {
+                if let Some(state) = &self.window_state {
+                    let window = &state.lock().unwrap().window;
+                    window.request_redraw();
+                }
             }
             _ => {}
         }
+
+        let next_tick = Instant::now() + Duration::from_millis(16);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next_tick));
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -115,12 +122,30 @@ impl ApplicationHandler for Application {
 
                 // 1) compute cols/rows in logical space
                 let scale = window.scale_factor() as f32;
-                let log_w = phys_w as f32 / scale;
-                let log_h = phys_h as f32 / scale;
+                let log_w = (phys_w - 10) as f32 / scale;
+                let log_h = (phys_h - 10) as f32 / scale;
 
-                let font_px = 16.0;
-                let cols = (log_w / font_px).floor() as u16;
-                let rows = (log_h / font_px).floor() as u16;
+                let metrics = Metrics::new(16.0, 16.0 * 1.2);
+                let mut buffer = Buffer::new_empty(metrics);
+
+                let (cell_width, cell_height) = {
+                    buffer.set_wrap(font_system, Wrap::None);
+
+                    // Use size of space to determine cell size
+                    buffer.set_text(
+                        font_system,
+                        " ",
+                        &Attrs::new().family(Family::Monospace),
+                        Shaping::Advanced,
+                    );
+                    let layout = buffer.line_layout(font_system, 0).unwrap();
+                    let w = layout[0].w;
+                    buffer.set_monospace_width(font_system, Some(w));
+                    (w, metrics.line_height)
+                };
+
+                let cols = (log_w / cell_width).floor() as u16;
+                let rows = (log_h / cell_height).floor() as u16;
                 tracing::info!("Resizing terminal to {} cols and {} rows", cols, rows);
 
                 tracing::info!(
@@ -138,7 +163,6 @@ impl ApplicationHandler for Application {
 
                 // 3) resize your TTY
                 self.terminal.resize(cols, rows).unwrap();
-
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -149,31 +173,35 @@ impl ApplicationHandler for Application {
                         height: surface_config.height,
                     },
                 );
-                text_buffer.set_text(
-                    font_system,
-                    &self.terminal.as_text(),
-                    &Attrs::new().family(Family::Monospace),
-                    Shaping::Advanced,
-                );
-                text_renderer
-                    .prepare(
-                        device,
-                        queue,
+
+                if self.terminal.is_dirty() {
+                    text_buffer.set_text(
                         font_system,
-                        atlas,
-                        viewport,
-                        [TextArea {
-                            buffer: text_buffer,
-                            left: 10.0,
-                            top: 10.0,
-                            scale: window.scale_factor() as f32,
-                            bounds: TextBounds::default(),
-                            default_color: Color::rgb(255, 255, 255),
-                            custom_glyphs: &[],
-                        }],
-                        swash_cache,
-                    )
-                    .unwrap();
+                        &self.terminal.as_text(),
+                        &Attrs::new().family(Family::Monospace),
+                        Shaping::Advanced,
+                    );
+                    text_renderer
+                        .prepare(
+                            device,
+                            queue,
+                            font_system,
+                            atlas,
+                            viewport,
+                            [TextArea {
+                                buffer: text_buffer,
+                                left: 10.0,
+                                top: 10.0,
+                                scale: window.scale_factor() as f32,
+                                bounds: TextBounds::default(),
+                                default_color: Color::rgb(255, 255, 255),
+                                custom_glyphs: &[],
+                            }],
+                            swash_cache,
+                        )
+                        .unwrap();
+                    self.terminal.clear_dirty();
+                }
 
                 let frame = surface.get_current_texture().unwrap();
                 let view = frame.texture.create_view(&TextureViewDescriptor::default());
@@ -207,6 +235,9 @@ impl ApplicationHandler for Application {
                 }
 
                 queue.submit(Some(encoder.finish()));
+                device
+                    .poll(wgpu::PollType::Wait)
+                    .expect("Failed to poll device");
                 frame.present();
 
                 atlas.trim();

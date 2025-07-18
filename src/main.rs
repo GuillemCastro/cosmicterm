@@ -33,7 +33,10 @@ fn main() -> anyhow::Result<()> {
     let terminal = Terminal::new(session);
 
     let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    let frame_interval = std::time::Duration::from_millis(16);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(
+        std::time::Instant::now() + frame_interval,
+    ));
     event_loop.run_app(&mut Application::new(terminal))?;
 
     Ok(())
